@@ -68,8 +68,12 @@ function resolveLocalAsset(sourceDirectory, sourceValue) {
   } catch (error) {
     return { error: "图片路径编码无效" };
   }
-  if (!relativePath || path.isAbsolute(relativePath)) return { error: "图片路径必须是目录内的相对路径" };
-  const resolvedPath = path.resolve(sourceDirectory, relativePath);
+  if (!relativePath || path.isAbsolute(relativePath) || /^[a-zA-Z]:[\\/]/.test(relativePath) || relativePath.startsWith("\\")) {
+    return { error: "图片路径必须是目录内的相对路径" };
+  }
+  const normalizedPath = relativePath.replaceAll("\\", path.sep);
+  if (normalizedPath.includes("\0")) return { error: "图片路径包含无效字符" };
+  const resolvedPath = path.resolve(sourceDirectory, normalizedPath);
   const relativeToRoot = path.relative(path.resolve(sourceDirectory), resolvedPath);
   if (!relativeToRoot || relativeToRoot.startsWith("..") || path.isAbsolute(relativeToRoot)) {
     return { error: "图片路径超出文章目录范围" };
@@ -78,7 +82,7 @@ function resolveLocalAsset(sourceDirectory, sourceValue) {
 }
 
 async function inspectHtmlFile(sourcePath) {
-  const absolutePath = path.resolve(sourcePath);
+  const absolutePath = await fileSystem.realpath(path.resolve(sourcePath));
   const sourceDirectory = path.dirname(absolutePath);
   const sourceHtml = await fileSystem.readFile(absolutePath, "utf8");
   const $ = cheerio.load(sourceHtml, { decodeEntities: false });
@@ -150,8 +154,16 @@ async function inspectHtmlFile(sourcePath) {
       continue;
     }
     let stats;
+    let assetPath;
     try {
-      stats = await fileSystem.stat(resolved.path);
+      assetPath = await fileSystem.realpath(resolved.path);
+      const relativeAssetPath = path.relative(sourceDirectory, assetPath);
+      if (!relativeAssetPath || relativeAssetPath.startsWith("..") || path.isAbsolute(relativeAssetPath)) {
+        $(imageElement).remove();
+        addIssue(issues, "invalid-image", `图片路径超出文章目录范围：${imageSource}`, issueCounter++);
+        continue;
+      }
+      stats = await fileSystem.stat(assetPath);
     } catch (error) {
       $(imageElement).remove();
       addIssue(issues, "missing-image", `找不到图片：${imageSource}`, issueCounter++);
@@ -162,8 +174,15 @@ async function inspectHtmlFile(sourcePath) {
       addIssue(issues, "invalid-image", `图片路径不是文件：${imageSource}`, issueCounter++);
       continue;
     }
-    const content = await fileSystem.readFile(resolved.path);
-    const mimeType = mime.lookup(resolved.path) || "";
+    let content;
+    try {
+      content = await fileSystem.readFile(assetPath);
+    } catch (error) {
+      $(imageElement).remove();
+      addIssue(issues, "file-error", `图片文件无法读取：${imageSource}`, issueCounter++);
+      continue;
+    }
+    const mimeType = mime.lookup(assetPath) || "";
     if (!SUPPORTED_IMAGE_TYPES.has(mimeType)) {
       $(imageElement).remove();
       addIssue(issues, "unsupported-image", `图片格式不支持：${imageSource}`, issueCounter++);
@@ -174,7 +193,7 @@ async function inspectHtmlFile(sourcePath) {
     if (!asset) {
       asset = {
         id: makeId("asset"),
-        path: resolved.path,
+        path: assetPath,
         mimeType,
         sha256: hash,
         usage: "inline"
@@ -223,15 +242,25 @@ function validateArticle(article) {
   const unresolvedIssues = (article.issues || []).filter((item) => !ignored.has(item.id));
   const coverExists = Boolean(article.coverAssetId && (article.assets || []).some((asset) => asset.id === article.coverAssetId));
   const missingCover = (article.issues || []).some((item) => item.type === "missing-cover");
+  const assetIds = new Set((article.assets || []).map((asset) => asset.id));
+  const unresolvedAssetIds = [...String(article.contentHtml || "").matchAll(/asset:\/\/([a-zA-Z0-9-]+)/g)]
+    .map((match) => match[1])
+    .filter((assetId, index, values) => !assetIds.has(assetId) && values.indexOf(assetId) === index);
+  if (unresolvedAssetIds.length) {
+    unresolvedIssues.push({
+      id: "unresolved-asset-reference",
+      type: "invalid-content",
+      severity: "error",
+      blocking: true,
+      canIgnore: false,
+      message: `正文引用了不存在的图片资源：${unresolvedAssetIds.join("、")}`
+    });
+  }
   return {
     valid: unresolvedIssues.length === 0 && coverExists && !missingCover && Boolean(String(article.title || "").trim()),
     unresolvedIssues,
     coverExists
   };
-}
-
-function removeIgnoredIssueElements(article) {
-  return String(article.contentHtml || "");
 }
 
 function replaceAssetTokens(contentHtml, replacements) {
@@ -241,7 +270,6 @@ function replaceAssetTokens(contentHtml, replacements) {
 module.exports = {
   SUPPORTED_IMAGE_TYPES,
   inspectHtmlFile,
-  removeIgnoredIssueElements,
   replaceAssetTokens,
   resolveLocalAsset,
   safeStyle,

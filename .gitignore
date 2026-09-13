@@ -6,4 +6,6 @@ dist/
 .tmp/
 .test-tmp/
 .store-test/
+.app-data/
+.ui-data/
 .DS_Store

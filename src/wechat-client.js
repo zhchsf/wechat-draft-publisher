@@ -41,6 +41,14 @@ class WechatClient {
     this.token = null;
   }
 
+  async ensureReadableFile(filePath, label) {
+    try {
+      await fs.promises.access(filePath, fs.constants.R_OK);
+    } catch (error) {
+      throw new WechatApiError(`${label}文件无法读取：${filePath}`, "FILE_ERROR", { cause: error.code || error.message });
+    }
+  }
+
   async getAccessToken() {
     this.ensureCredentials();
     if (this.token && this.token.expiresAt > Date.now()) return this.token.value;
@@ -63,22 +71,30 @@ class WechatClient {
   }
 
   async executeWithTokenRetry(operation) {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const token = await this.getAccessToken();
+    let tokenRetryAvailable = true;
+    let networkRetryAvailable = true;
+    while (true) {
       try {
+        const token = await this.getAccessToken();
         return await operation(token);
       } catch (error) {
-        if (attempt === 0 && TOKEN_ERROR_CODES.has(Number(error.code))) {
+        if (tokenRetryAvailable && TOKEN_ERROR_CODES.has(Number(error.code))) {
+          tokenRetryAvailable = false;
           this.clearToken();
+          continue;
+        }
+        if (networkRetryAvailable && error.code === "NETWORK_ERROR") {
+          networkRetryAvailable = false;
+          await new Promise((resolve) => setTimeout(resolve, 250));
           continue;
         }
         throw error;
       }
     }
-    throw new WechatApiError("微信接口令牌重试失败", "TOKEN_RETRY_FAILED");
   }
 
   async uploadPermanentImage(filePath, token) {
+    await this.ensureReadableFile(filePath, "封面");
     const form = new FormData();
     form.append("media", fs.createReadStream(filePath));
     let response;
@@ -97,6 +113,7 @@ class WechatClient {
   }
 
   async uploadInlineImage(filePath, token) {
+    await this.ensureReadableFile(filePath, "正文图片");
     const form = new FormData();
     form.append("media", fs.createReadStream(filePath));
     let response;

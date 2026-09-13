@@ -10,7 +10,8 @@
     sourceCandidates: [],
     modal: null,
     toast: null,
-    busy: false
+    busy: false,
+    previewAssetErrors: []
   };
   let state = { settings: { appid: "", appsecret: "" }, queue: [], history: [] };
 
@@ -76,7 +77,10 @@
     if (ui.busy) return;
     try {
       const candidates = await api.selectSources();
-      if (!candidates.length) return;
+      if (!candidates.length) {
+        showToast("所选位置中没有找到 HTML 文件", "warning");
+        return;
+      }
       ui.sourceCandidates = candidates;
       if (candidates.length === 1) {
         await inspectSelectedSources(candidates);
@@ -101,7 +105,7 @@
       additions.forEach((article) => ui.selectedIds.add(article.id));
       if (!ui.activeArticleId && additions[0]) ui.activeArticleId = additions[0].id;
       await persistQueue();
-      showToast(`已导入 ${additions.length} 篇文章`, "success");
+      showToast(additions.length ? `已导入 ${additions.length} 篇文章` : "所选文章已在队列中", additions.length ? "success" : "warning");
     } catch (error) {
       showToast(error.message || "解析文章失败", "error");
     } finally {
@@ -128,7 +132,8 @@
     }
     const invalid = state.queue.filter((article) => ids.includes(article.id)).filter((article) => {
       const ignored = new Set(article.ignoredIssueIds || []);
-      return (article.issues || []).some((issue) => !ignored.has(issue.id)) || !String(article.title || "").trim() || !article.coverAssetId;
+      const coverExists = Boolean(article.coverAssetId && (article.assets || []).some((asset) => asset.id === article.coverAssetId));
+      return (article.issues || []).some((issue) => !ignored.has(issue.id)) || !String(article.title || "").trim() || !coverExists;
     });
     if (invalid.length) {
       showToast(`有 ${invalid.length} 篇文章仍有未处理问题`, "warning");
@@ -142,6 +147,7 @@
     try {
       const response = await api.publishArticles(ids);
       state = response.state;
+      response.results.filter((item) => item.status === "success").forEach((item) => ui.selectedIds.delete(item.articleId));
       showToast(`发布任务完成：成功 ${response.results.filter((item) => item.status === "success").length} 篇`, "success");
     } catch (error) {
       showToast(error.message || "发布任务失败", "error");
@@ -180,14 +186,23 @@
   async function testConnection() {
     ui.busy = true;
     render();
-    const result = await api.testConnection();
-    ui.busy = false;
-    showToast(result.ok ? result.message : `${result.message}（${result.code}）`, result.ok ? "success" : "error");
-    render();
+    try {
+      const result = await api.testConnection();
+      showToast(result.ok ? result.message : `${result.message}（${result.code}）`, result.ok ? "success" : "error");
+    } catch (error) {
+      showToast(error.message || "测试接口失败", "error");
+    } finally {
+      ui.busy = false;
+      render();
+    }
   }
 
   async function updateArticleField(article, field, value) {
     article[field] = value;
+    if (article.status === "success") {
+      article.status = "ready";
+      article.draftMediaId = "";
+    }
     article.updatedAt = new Date().toISOString();
     await persistQueue();
   }
@@ -212,14 +227,23 @@
     const frame = document.querySelector("[data-preview-frame]");
     if (!frame || !article) return;
     const assetData = {};
+    const assetErrors = [];
     for (const asset of article.assets || []) {
       try {
         assetData[asset.id] = await api.readAsset(article.id, asset.id);
       } catch (error) {
         assetData[asset.id] = "";
+        assetErrors.push(asset.path || asset.id);
       }
     }
-    if (document.querySelector("[data-preview-frame]") === frame) frame.srcdoc = previewDocument(article, assetData);
+    if (document.querySelector("[data-preview-frame]") === frame) {
+      frame.srcdoc = previewDocument(article, assetData);
+      const status = document.querySelector("[data-preview-status]");
+      if (status) {
+        status.hidden = !assetErrors.length;
+        status.textContent = assetErrors.length ? `有 ${assetErrors.length} 张图片无法读取，发布前请检查源文件是否被移动或删除。` : "";
+      }
+    }
   }
 
   function renderHeader() {
@@ -246,7 +270,7 @@
   }
 
   function renderPreview(article) {
-    return `<section class="preview-panel"><div class="panel-heading"><div><span class="eyebrow">SAFE PREVIEW</span><h2>正文预览</h2></div><span class="preview-badge">沙箱预览</span></div><div class="preview-meta"><strong>${escapeHtml(article.title || "未命名文章")}</strong><span>${escapeHtml(article.author || "未设置作者")} · ${article.assets?.length || 0} 张图片</span></div><iframe data-preview-frame title="文章正文预览" sandbox=""></iframe></section>`;
+    return `<section class="preview-panel"><div class="panel-heading"><div><span class="eyebrow">SAFE PREVIEW</span><h2>正文预览</h2></div><span class="preview-badge">沙箱预览</span></div><div class="preview-meta"><strong>${escapeHtml(article.title || "未命名文章")}</strong><span>${escapeHtml(article.author || "未设置作者")} · ${article.assets?.length || 0} 张图片</span></div><div class="preview-status" data-preview-status hidden></div><iframe data-preview-frame title="文章正文预览" sandbox=""></iframe></section>`;
   }
 
   function renderQueueView() {
@@ -395,6 +419,8 @@
 
   api.getState().then((loadedState) => {
     state = loadedState;
+    render();
+    if (loadedState.loadWarning) showToast(loadedState.loadWarning, "warning");
     if (state.queue[0]) {
       ui.activeArticleId = state.queue[0].id;
       state.queue.filter((article) => article.status === "ready" || article.status === "queued" || article.status === "failed").forEach((article) => ui.selectedIds.add(article.id));

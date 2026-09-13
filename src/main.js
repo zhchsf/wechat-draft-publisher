@@ -2,9 +2,10 @@ const path = require("path");
 const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
 
 const { StateStore } = require("./store");
-const { discoverHtmlFiles, readHtmlFile } = require("./file-service");
-const { inspectHtmlFile, validateArticle } = require("./content-service");
+const { discoverHtmlFiles } = require("./file-service");
+const { inspectHtmlFile } = require("./content-service");
 const { WechatApiError, WechatClient } = require("./wechat-client");
+const { publishArticleIds, serializeError } = require("./publish-service");
 
 let mainWindow;
 let stateStore;
@@ -32,90 +33,33 @@ function sendProgress(sender, payload) {
   if (sender && !sender.isDestroyed()) sender.send("publish-progress", payload);
 }
 
-function serializeError(error) {
-  return {
-    code: error.code || "UNKNOWN_ERROR",
-    message: error.message || "操作失败",
-    details: error.details || null
-  };
-}
-
-function articleHistory(article, status, error = null) {
-  return {
-    id: `history-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    articleId: article.id,
-    sourcePath: article.sourcePath,
-    title: article.title,
-    status,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    contentHash: article.assets?.map((asset) => asset.sha256).join(":") || "",
-    draftMediaId: article.draftMediaId || "",
-    errorCode: error?.code || "",
-    errorMessage: error?.message || ""
-  };
-}
-
-async function persistState() {
-  await stateStore.save(await stateStore.load());
-}
-
-async function publishArticleIds(articleIds, sender) {
+async function runPublishArticleIds(articleIds, sender) {
   if (publishing) throw new WechatApiError("已有发布任务正在进行，请等待当前任务完成", "PUBLISHING");
-  const state = await stateStore.load();
-  const ids = [...new Set(articleIds || [])];
-  const selectedArticles = ids.map((id) => state.queue.find((article) => article.id === id)).filter(Boolean);
-  if (!selectedArticles.length) throw new WechatApiError("没有可发布的文章", "EMPTY_QUEUE");
-  if (!state.settings.appid || !state.settings.appsecret) {
-    throw new WechatApiError("请先在设置中填写公众号 AppID 和 AppSecret", "MISSING_CREDENTIALS");
-  }
-
   publishing = true;
-  const client = new WechatClient(state.settings);
-  const results = [];
   try {
-    for (let index = 0; index < selectedArticles.length; index += 1) {
-      const article = selectedArticles[index];
-      article.status = "publishing";
-      article.lastError = null;
-      article.updatedAt = new Date().toISOString();
-      await persistState();
-      sendProgress(sender, { articleId: article.id, index: index + 1, total: selectedArticles.length, status: "publishing", title: article.title });
-      try {
-        const validation = validateArticle(article);
-        if (!validation.valid) {
-          throw new WechatApiError(
-            `文章校验未通过：${validation.unresolvedIssues.map((item) => item.message).join("；") || "缺少封面或标题"}`,
-            "VALIDATION_ERROR",
-            { issues: validation.unresolvedIssues }
-          );
-        }
-        const result = await client.createDraft(article);
-        article.status = "success";
-        article.draftMediaId = result.mediaId;
-        article.lastError = null;
-        state.history.unshift(articleHistory(article, "success"));
-        results.push({ articleId: article.id, status: "success", mediaId: result.mediaId });
-        sendProgress(sender, { articleId: article.id, index: index + 1, total: selectedArticles.length, status: "success", title: article.title, mediaId: result.mediaId });
-      } catch (error) {
-        const normalizedError = serializeError(error);
-        article.status = "failed";
-        article.lastError = normalizedError;
-        state.history.unshift(articleHistory(article, "failed", normalizedError));
-        results.push({ articleId: article.id, status: "failed", error: normalizedError });
-        sendProgress(sender, { articleId: article.id, index: index + 1, total: selectedArticles.length, status: "failed", title: article.title, error: normalizedError });
-      }
-      article.updatedAt = new Date().toISOString();
-      await persistState();
-    }
+    return await publishArticleIds({ stateStore, articleIds, sender });
   } finally {
     publishing = false;
   }
-  return { results, state };
+}
+
+async function readAssetData(article, asset) {
+  const fileSystem = require("fs").promises;
+  const sourceDirectory = path.dirname(await fileSystem.realpath(article.sourcePath));
+  const assetPath = await fileSystem.realpath(asset.path);
+  const relativePath = path.relative(sourceDirectory, assetPath);
+  if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    throw new WechatApiError("文章图片不在源文件目录内", "ASSET_OUTSIDE_ROOT");
+  }
+  const content = await fileSystem.readFile(assetPath);
+  return `data:${asset.mimeType};base64,${content.toString("base64")}`;
 }
 
 function registerIpc() {
-  ipcMain.handle("get-state", async () => stateStore.load());
+  ipcMain.handle("get-state", async () => {
+    const state = await stateStore.load();
+    return { ...state, loadWarning: stateStore.getLoadWarning() };
+  });
 
   ipcMain.handle("select-sources", async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -135,16 +79,17 @@ function registerIpc() {
     return articles;
   });
 
-  ipcMain.handle("read-source", async (_, sourcePath) => readHtmlFile(sourcePath));
-
   ipcMain.handle("read-asset", async (_, { articleId, assetId }) => {
     const state = await stateStore.load();
     const article = state.queue.find((item) => item.id === articleId);
     const asset = article?.assets?.find((item) => item.id === assetId);
     if (!asset) throw new WechatApiError("找不到文章图片资源", "ASSET_NOT_FOUND");
-    const file = require("fs").promises;
-    const content = await file.readFile(asset.path);
-    return `data:${asset.mimeType};base64,${content.toString("base64")}`;
+    try {
+      return await readAssetData(article, asset);
+    } catch (error) {
+      if (error instanceof WechatApiError) throw error;
+      throw new WechatApiError(`图片文件无法读取：${asset.path}`, "FILE_ERROR", { cause: error.code || error.message });
+    }
   });
 
   ipcMain.handle("save-queue", async (_, queue) => {
@@ -175,18 +120,20 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle("publish-articles", async (event, articleIds) => publishArticleIds(articleIds, event.sender));
+  ipcMain.handle("publish-articles", async (event, articleIds) => runPublishArticleIds(articleIds, event.sender));
 
   ipcMain.handle("retry-history", async (event, historyId) => {
     const state = await stateStore.load();
     const history = state.history.find((item) => item.id === historyId);
     if (!history) throw new WechatApiError("找不到发布历史", "HISTORY_NOT_FOUND");
+    if (history.status !== "failed") throw new WechatApiError("只有失败记录可以重试", "HISTORY_NOT_RETRYABLE");
     const article = state.queue.find((item) => item.id === history.articleId);
     if (!article) throw new WechatApiError("原文章不在当前队列中，请重新导入源文件", "ARTICLE_NOT_FOUND");
+    if (article.status === "success") throw new WechatApiError("文章已经创建过草稿，无需重试", "ALREADY_PUBLISHED");
     article.status = "queued";
     article.lastError = null;
     await stateStore.save(state);
-    return publishArticleIds([article.id], event.sender);
+    return runPublishArticleIds([article.id], event.sender);
   });
 
   ipcMain.handle("open-source-folder", async (_, sourcePath) => {
