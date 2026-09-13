@@ -49,7 +49,7 @@ function sendProgress(sender, payload) {
 
 async function publishArticleIds({ stateStore, articleIds, sender, clientFactory = (settings) => new WechatClient(settings) }) {
   const state = await stateStore.load();
-  const ids = [...new Set(articleIds || [])];
+  const ids = [...new Set(Array.isArray(articleIds) ? articleIds : [])];
   const selectedArticles = ids.map((id) => state.queue.find((article) => article.id === id))
     .filter((article) => article && article.status !== "success" && article.status !== "publishing");
   if (!selectedArticles.length) throw new WechatApiError("没有可发布的文章", "EMPTY_QUEUE");

@@ -73,7 +73,7 @@ function registerIpc() {
 
   ipcMain.handle("inspect-sources", async (_, sourcePaths) => {
     const articles = [];
-    for (const sourcePath of sourcePaths || []) {
+    for (const sourcePath of Array.isArray(sourcePaths) ? sourcePaths : []) {
       articles.push(await inspectHtmlFile(sourcePath));
     }
     return articles;
@@ -95,8 +95,7 @@ function registerIpc() {
   ipcMain.handle("save-queue", async (_, queue) => {
     const state = await stateStore.load();
     state.queue = Array.isArray(queue) ? queue : [];
-    await stateStore.save(state);
-    return state;
+    return stateStore.save(state);
   });
 
   ipcMain.handle("save-settings", async (_, settings) => {
@@ -113,7 +112,7 @@ function registerIpc() {
     const state = await stateStore.load();
     try {
       const client = new WechatClient(state.settings);
-      await client.getAccessToken();
+      await client.testConnection();
       return { ok: true, message: "微信接口连接成功，IP 白名单和凭据有效" };
     } catch (error) {
       return { ok: false, ...serializeError(error) };

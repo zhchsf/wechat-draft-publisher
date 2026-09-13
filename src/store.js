@@ -35,7 +35,7 @@ function normalizeState(value) {
       }
       return article;
     }) : [],
-    history: Array.isArray(source.history) ? source.history : []
+    history: Array.isArray(source.history) ? source.history.filter((item) => item && typeof item === "object") : []
   };
 }
 
@@ -54,6 +54,11 @@ class StateStore {
       const raw = await fileSystem.readFile(this.filePath, "utf8");
       this.state = normalizeState(JSON.parse(raw));
       shouldPersist = this.state.queue.some((article) => article.lastError?.code === "INTERRUPTED");
+      try {
+        await fileSystem.chmod(this.filePath, 0o600);
+      } catch (error) {
+        this.loadWarning = "本地状态文件权限无法设置为 0600，请检查当前用户对该文件的权限";
+      }
     } catch (error) {
       if (error.code === "ENOENT") {
         this.state = defaultState();
@@ -61,14 +66,25 @@ class StateStore {
         const backupPath = `${this.filePath}.corrupt-${Date.now()}`;
         try {
           await fileSystem.rename(this.filePath, backupPath);
-          this.loadWarning = `本地状态文件无法读取，已备份为 ${path.basename(backupPath)}，已恢复空状态`;
+          try {
+            await fileSystem.chmod(backupPath, 0o600);
+            this.loadWarning = `本地状态文件无法读取，已备份为 ${path.basename(backupPath)}，已恢复空状态`;
+          } catch (permissionError) {
+            this.loadWarning = `本地状态文件无法读取，已备份为 ${path.basename(backupPath)}，但权限未能设置为 0600`;
+          }
         } catch (backupError) {
           this.loadWarning = "本地状态文件无法读取，已恢复空状态；原文件未能自动备份";
         }
         this.state = defaultState();
       }
     }
-    if (shouldPersist) await this.save(this.state);
+    if (shouldPersist) {
+      try {
+        await this.save(this.state);
+      } catch (error) {
+        this.loadWarning = "检测到上一次未完成的发布任务，但恢复状态未能写回磁盘";
+      }
+    }
     return this.state;
   }
 

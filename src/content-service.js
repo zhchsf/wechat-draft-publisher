@@ -50,6 +50,16 @@ function metadataValue($, selectors) {
   return "";
 }
 
+function isSafeSourceUrl(value) {
+  if (!String(value || "").trim()) return true;
+  try {
+    const parsed = new URL(String(value).trim());
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch (error) {
+    return false;
+  }
+}
+
 function safeStyle(style) {
   const value = String(style || "");
   if (/url\s*\(|expression\s*\(|javascript\s*:|-moz-binding/i.test(value)) return "";
@@ -71,7 +81,7 @@ function resolveLocalAsset(sourceDirectory, sourceValue) {
   if (!relativePath || path.isAbsolute(relativePath) || /^[a-zA-Z]:[\\/]/.test(relativePath) || relativePath.startsWith("\\")) {
     return { error: "图片路径必须是目录内的相对路径" };
   }
-  const normalizedPath = relativePath.replaceAll("\\", path.sep);
+  const normalizedPath = relativePath.replace(/\\/g, path.sep);
   if (normalizedPath.includes("\0")) return { error: "图片路径包含无效字符" };
   const resolvedPath = path.resolve(sourceDirectory, normalizedPath);
   const relativeToRoot = path.relative(path.resolve(sourceDirectory), resolvedPath);
@@ -92,8 +102,19 @@ async function inspectHtmlFile(sourcePath) {
   const title = metadataValue($, ["title"]) || path.basename(absolutePath, path.extname(absolutePath));
   const digest = metadataValue($, ['meta[name="description"]', 'meta[property="og:description"]']);
   const author = metadataValue($, ['meta[name="author"]', 'meta[property="article:author"]']);
-  const sourceUrl = $("link[rel=canonical]").first().attr("href") || $("meta[property='og:url']").first().attr("content") || "";
+  const sourceUrlCandidate = $("link[rel=canonical]").first().attr("href") || $("meta[property='og:url']").first().attr("content") || "";
+  const sourceUrl = isSafeSourceUrl(sourceUrlCandidate) ? String(sourceUrlCandidate).trim() : "";
+  if (sourceUrlCandidate && !sourceUrl) {
+    addIssue(issues, "invalid-source-url", "原文链接不是有效的 HTTP(S) 地址，已移除", issueCounter++);
+  }
 
+  $("head script, head style, head link").each((_, element) => {
+    const tagName = String(element.name || "").toLowerCase();
+    const rel = String($(element).attr("rel") || "").toLowerCase();
+    if (tagName === "link" && !rel.split(/\s+/).includes("stylesheet")) return;
+    const message = tagName === "link" ? "已移除外部样式依赖" : `已移除不支持的 HTML 元素：${tagName}`;
+    addIssue(issues, tagName === "link" ? "unsupported-style" : "unsupported-tag", message, issueCounter++);
+  });
   $("head").remove();
   $("html").children().not("body").remove();
 
@@ -132,7 +153,7 @@ async function inspectHtmlFile(sourcePath) {
     }
     if (tagName === "a") {
       const href = $(element).attr("href");
-      if (href && /^(javascript:|data:)/i.test(href)) $(element).removeAttr("href");
+      if (href && /^(javascript:|data:|vbscript:)/i.test(href)) $(element).removeAttr("href");
     }
   });
 
@@ -239,10 +260,12 @@ async function inspectHtmlFile(sourcePath) {
 
 function validateArticle(article) {
   const ignored = new Set(article.ignoredIssueIds || []);
-  const unresolvedIssues = (article.issues || []).filter((item) => !ignored.has(item.id));
-  const coverExists = Boolean(article.coverAssetId && (article.assets || []).some((asset) => asset.id === article.coverAssetId));
-  const missingCover = (article.issues || []).some((item) => item.type === "missing-cover");
-  const assetIds = new Set((article.assets || []).map((asset) => asset.id));
+  const issues = Array.isArray(article.issues) ? article.issues : [];
+  const assets = Array.isArray(article.assets) ? article.assets : [];
+  const unresolvedIssues = issues.filter((item) => item.canIgnore === false || !ignored.has(item.id));
+  const coverExists = Boolean(article.coverAssetId && assets.some((asset) => asset.id === article.coverAssetId));
+  const missingCover = issues.some((item) => item.type === "missing-cover");
+  const assetIds = new Set(assets.map((asset) => asset.id));
   const unresolvedAssetIds = [...String(article.contentHtml || "").matchAll(/asset:\/\/([a-zA-Z0-9-]+)/g)]
     .map((match) => match[1])
     .filter((assetId, index, values) => !assetIds.has(assetId) && values.indexOf(assetId) === index);
@@ -254,6 +277,16 @@ function validateArticle(article) {
       blocking: true,
       canIgnore: false,
       message: `正文引用了不存在的图片资源：${unresolvedAssetIds.join("、")}`
+    });
+  }
+  if (!isSafeSourceUrl(article.sourceUrl)) {
+    unresolvedIssues.push({
+      id: "invalid-source-url",
+      type: "invalid-content",
+      severity: "error",
+      blocking: true,
+      canIgnore: false,
+      message: "原文链接必须是 HTTP(S) 地址"
     });
   }
   return {
@@ -273,5 +306,6 @@ module.exports = {
   replaceAssetTokens,
   resolveLocalAsset,
   safeStyle,
+  isSafeSourceUrl,
   validateArticle
 };

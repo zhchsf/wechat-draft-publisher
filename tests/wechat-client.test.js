@@ -76,4 +76,123 @@ describe("wechat client", () => {
     assert.equal(tokenCalls, 2);
     assert.equal(draftCalls, 2);
   });
+
+  it("retries a transient network failure once", async () => {
+    let coverCalls = 0;
+    const http = {
+      async get() {
+        return { data: { access_token: "token", expires_in: 7200 } };
+      },
+      async post(url) {
+        if (url.includes("material/add_material")) {
+          coverCalls += 1;
+          if (coverCalls === 1) {
+            const error = new Error("timeout");
+            error.code = "ETIMEDOUT";
+            throw error;
+          }
+          return { data: { media_id: "thumb-media-id" } };
+        }
+        return { data: { media_id: "draft-media-id" } };
+      }
+    };
+    const article = {
+      title: "网络重试",
+      contentHtml: "<p>正文</p>",
+      coverAssetId: "cover",
+      assets: [{ id: "cover", path: __filename, mimeType: "image/png", sha256: "hash" }],
+      issues: [],
+      ignoredIssueIds: []
+    };
+    const client = new WechatClient({ appid: "wx-test", appsecret: "secret" }, { http });
+    const result = await client.createDraft(article);
+    assert.equal(result.mediaId, "draft-media-id");
+    assert.equal(coverCalls, 2);
+  });
+
+  it("preserves business errors returned through an HTTP rejection", async () => {
+    const http = {
+      async get() {
+        return { data: { access_token: "token", expires_in: 7200 } };
+      },
+      async post(url) {
+        if (url.includes("material/add_material")) return { data: { media_id: "thumb-media-id" } };
+        const error = new Error("request failed");
+        error.response = { data: { errcode: 40013, errmsg: "invalid appid" } };
+        throw error;
+      }
+    };
+    const article = {
+      title: "业务错误",
+      contentHtml: "<p>正文</p>",
+      coverAssetId: "cover",
+      assets: [{ id: "cover", path: __filename, mimeType: "image/png", sha256: "hash" }],
+      issues: [],
+      ignoredIssueIds: []
+    };
+    const client = new WechatClient({ appid: "wx-test", appsecret: "secret" }, { http });
+    await assert.rejects(() => client.createDraft(article), (error) => error.code === 40013 && error.message === "invalid appid");
+  });
+
+  it("retries the temporary WeChat busy error once", async () => {
+    let draftCalls = 0;
+    const http = {
+      async get() {
+        return { data: { access_token: "token", expires_in: 7200 } };
+      },
+      async post(url) {
+        if (url.includes("material/add_material")) return { data: { media_id: "thumb-media-id" } };
+        if (url.includes("draft/add")) {
+          draftCalls += 1;
+          if (draftCalls === 1) return { data: { errcode: -1, errmsg: "system busy" } };
+          return { data: { media_id: "draft-media-id" } };
+        }
+        return { data: { url: "https://mmbiz.qpic.cn/inline.png" } };
+      }
+    };
+    const article = {
+      title: "临时错误",
+      contentHtml: "<p>正文</p>",
+      coverAssetId: "cover",
+      assets: [{ id: "cover", path: __filename, mimeType: "image/png", sha256: "hash" }],
+      issues: [],
+      ignoredIssueIds: []
+    };
+    const client = new WechatClient({ appid: "wx-test", appsecret: "secret" }, { http });
+    const result = await client.createDraft(article);
+    assert.equal(result.mediaId, "draft-media-id");
+    assert.equal(draftCalls, 2);
+  });
+
+  it("uses a fallback token lifetime when expires_in is invalid", async () => {
+    let tokenCalls = 0;
+    const http = {
+      async get() {
+        tokenCalls += 1;
+        return { data: { access_token: "token", expires_in: "invalid" } };
+      }
+    };
+    const client = new WechatClient({ appid: "wx-test", appsecret: "secret" }, { http });
+    await client.getAccessToken();
+    await client.getAccessToken();
+    assert.equal(tokenCalls, 1);
+  });
+
+  it("retries a connection test after a network failure", async () => {
+    let tokenCalls = 0;
+    const http = {
+      async get() {
+        tokenCalls += 1;
+        if (tokenCalls === 1) {
+          const error = new Error("timeout");
+          error.code = "ETIMEDOUT";
+          throw error;
+        }
+        return { data: { access_token: "token", expires_in: 7200 } };
+      }
+    };
+    const client = new WechatClient({ appid: "wx-test", appsecret: "secret" }, { http });
+    assert.equal(await client.testConnection(), true);
+    assert.equal(tokenCalls, 2);
+  });
 });

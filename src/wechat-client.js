@@ -6,6 +6,7 @@ const { replaceAssetTokens, validateArticle } = require("./content-service");
 
 const API_ROOT = "https://api.weixin.qq.com";
 const TOKEN_ERROR_CODES = new Set([40001, 40014, 42001]);
+const TRANSIENT_ERROR_CODES = new Set([-1]);
 
 class WechatApiError extends Error {
   constructor(message, code, details = {}) {
@@ -21,6 +22,12 @@ function responseError(payload, fallbackMessage) {
     return new WechatApiError(payload.errmsg || fallbackMessage, Number(payload.errcode), payload);
   }
   return null;
+}
+
+function requestError(error, fallbackMessage) {
+  const apiError = responseError(error?.response?.data, fallbackMessage);
+  if (apiError) return apiError;
+  return new WechatApiError(`${fallbackMessage}：${error.message}`, "NETWORK_ERROR", { cause: error.code || error.message });
 }
 
 class WechatClient {
@@ -58,16 +65,23 @@ class WechatClient {
         params: { grant_type: "client_credential", appid: this.appid, secret: this.appsecret }
       });
     } catch (error) {
-      throw new WechatApiError(`微信接口连接失败：${error.message}`, "NETWORK_ERROR", { cause: error.code || error.message });
+      throw requestError(error, "微信接口连接失败");
     }
     const apiError = responseError(response.data, "获取微信接口令牌失败");
     if (apiError) throw apiError;
     if (!response.data?.access_token) throw new WechatApiError("微信接口未返回 access_token", "INVALID_RESPONSE", response.data);
+    const expiresIn = Number(response.data.expires_in);
+    const validSeconds = Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : 7200;
     this.token = {
       value: response.data.access_token,
-      expiresAt: Date.now() + Math.max(60, Number(response.data.expires_in || 7200) - 300) * 1000
+      expiresAt: Date.now() + Math.max(60, validSeconds - 300) * 1000
     };
     return this.token.value;
+  }
+
+  async testConnection() {
+    await this.executeWithTokenRetry(async () => true);
+    return true;
   }
 
   async executeWithTokenRetry(operation) {
@@ -83,7 +97,7 @@ class WechatClient {
           this.clearToken();
           continue;
         }
-        if (networkRetryAvailable && error.code === "NETWORK_ERROR") {
+        if (networkRetryAvailable && (error.code === "NETWORK_ERROR" || TRANSIENT_ERROR_CODES.has(Number(error.code)))) {
           networkRetryAvailable = false;
           await new Promise((resolve) => setTimeout(resolve, 250));
           continue;
@@ -104,7 +118,7 @@ class WechatClient {
         headers: form.getHeaders()
       });
     } catch (error) {
-      throw new WechatApiError(`封面上传失败：${error.message}`, "NETWORK_ERROR", { cause: error.code || error.message });
+      throw requestError(error, "封面上传失败");
     }
     const apiError = responseError(response.data, "封面上传失败");
     if (apiError) throw apiError;
@@ -123,7 +137,7 @@ class WechatClient {
         headers: form.getHeaders()
       });
     } catch (error) {
-      throw new WechatApiError(`正文图片上传失败：${error.message}`, "NETWORK_ERROR", { cause: error.code || error.message });
+      throw requestError(error, "正文图片上传失败");
     }
     const apiError = responseError(response.data, "正文图片上传失败");
     if (apiError) throw apiError;
@@ -170,7 +184,7 @@ class WechatClient {
           headers: { "Content-Type": "application/json" }
         });
       } catch (error) {
-        throw new WechatApiError(`创建草稿失败：${error.message}`, "NETWORK_ERROR", { cause: error.code || error.message });
+        throw requestError(error, "创建草稿失败");
       }
       const apiError = responseError(response.data, "创建草稿失败");
       if (apiError) throw apiError;
@@ -183,7 +197,9 @@ class WechatClient {
 module.exports = {
   API_ROOT,
   TOKEN_ERROR_CODES,
+  TRANSIENT_ERROR_CODES,
   WechatApiError,
   WechatClient,
-  responseError
+  responseError,
+  requestError
 };
