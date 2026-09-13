@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.npm-cache/
+.electron-cache/
+.builder-cache/
+.tmp/
+.test-tmp/
+.store-test/
+.DS_Store
