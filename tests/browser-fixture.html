@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="../src/renderer/styles.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script>
+      window.publisherApi = {
+        getState: async () => ({ settings: { appid: "", appsecret: "" }, queue: [], history: [] }),
+        selectSources: async () => [],
+        inspectSources: async () => [],
+        readSource: async () => "",
+        readAsset: async () => "",
+        saveQueue: async (queue) => ({ settings: { appid: "", appsecret: "" }, queue, history: [] }),
+        saveSettings: async (settings) => settings,
+        testConnection: async () => ({ ok: false, code: "MISSING_CREDENTIALS", message: "请先配置" }),
+        publishArticles: async () => ({ results: [], state: { settings: { appid: "", appsecret: "" }, queue: [], history: [] } }),
+        retryHistory: async () => ({ results: [], state: { settings: { appid: "", appsecret: "" }, queue: [], history: [] } }),
+        openSourceFolder: async () => true,
+        onPublishProgress: () => () => {}
+      };
+    </script>
+    <script src="../src/renderer/renderer.js"></script>
+  </body>
+</html>

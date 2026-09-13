@@ -1,0 +1,53 @@
+{
+  "name": "wechat-draft-publisher",
+  "version": "0.1.0",
+  "description": "Local HTML to WeChat Official Account draft publisher",
+  "author": "Local Publisher",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "mocha \"tests/**/*.test.js\"",
+    "pack": "electron-builder --mac --dir",
+    "dist": "electron-builder --mac dmg"
+  },
+  "dependencies": {
+    "axios": "1.7.9",
+    "cheerio": "1.0.0-rc.12",
+    "mime-types": "2.1.35"
+  },
+  "devDependencies": {
+    "electron": "30.0.0",
+    "electron-builder": "24.13.3",
+    "mocha": "10.7.3"
+  },
+  "build": {
+    "appId": "com.chinaceib.wechatdraftpublisher",
+    "productName": "微信公众号草稿发布器",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "electronDownload": {
+      "cache": ".electron-cache"
+    },
+    "dmg": {
+      "title": "微信公众号草稿发布器"
+    }
+  }
+}
